@@ -1066,7 +1066,11 @@ class CmisManagerTask(threading.Thread):
         api.set_datapath_deinit(deinit_host_lanes_mask)
 
         # D.1.3 Software Configuration and Initialization
-        if not api.tx_disable_channel(disable_media_lanes_mask, True):
+        # Tx disable is optional in CMIS; a module that does not implement it must not
+        # block the transition out of ModuleLowPwr below.
+        if api.get_tx_disable_support() is False:
+            self.log_notice("{}: Tx disable not supported by module, skipping tx power off".format(lport))
+        elif not api.tx_disable_channel(disable_media_lanes_mask, True):
             self.log_notice("{}: unable to turn off tx power with host_lanes_mask {} media_lanes_mask {}".format(lport, deinit_host_lanes_mask, disable_media_lanes_mask))
             self.port_dict[lport]['cmis_retries'] = retries + 1
             return False

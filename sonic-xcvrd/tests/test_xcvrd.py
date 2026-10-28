@@ -3541,6 +3541,67 @@ class TestXcvrdScript(object):
         mock_xcvr_api.set_datapath_deinit.assert_called_once_with(0xff)
         mock_xcvr_api.tx_disable_channel.assert_called_once_with(0xff, True)
 
+    @pytest.mark.parametrize("tx_disable_support, tx_disable_ok, expected_state", [
+        (False, False, CMIS_STATE_AP_CONF),
+        (True, True, CMIS_STATE_AP_CONF),
+        (True, False, CMIS_STATE_DP_DEINIT),
+        (None, False, CMIS_STATE_DP_DEINIT),
+    ])
+    @patch('xcvrd.xcvrd.XcvrTableHelper.get_status_sw_tbl')
+    @patch('xcvrd.xcvrd_utilities.common.is_fast_reboot_enabled', MagicMock(return_value=False))
+    def test_CmisManagerTask_dp_deinit_tx_disable_support(self, mock_get_status_sw_tbl, tx_disable_support,
+                                                          tx_disable_ok, expected_state):
+        """Modules that do not implement Tx disable (e.g. some AECs) must still be moved out of
+        ModuleLowPwr instead of retrying DP_DEINIT until CMIS FAILED."""
+        mock_get_status_sw_tbl = Table("STATE_DB", TRANSCEIVER_STATUS_SW_TABLE)
+
+        mock_xcvr_api = MagicMock()
+        mock_xcvr_api.is_flat_memory = MagicMock(return_value=False)
+        mock_xcvr_api.is_coherent_module = MagicMock(return_value=False)
+        mock_xcvr_api.get_module_type_abbreviation = MagicMock(return_value='QSFP-DD')
+        mock_xcvr_api.get_module_state = MagicMock(return_value='ModuleLowPwr')
+        mock_xcvr_api.get_tx_disable_support = MagicMock(return_value=tx_disable_support)
+        mock_xcvr_api.tx_disable_channel = MagicMock(return_value=tx_disable_ok)
+        mock_xcvr_api.set_lpmode = MagicMock(return_value=True)
+        mock_xcvr_api.get_datapath_deinit_duration = MagicMock(return_value=0)
+        mock_xcvr_api.get_module_pwr_up_duration = MagicMock(return_value=0)
+
+        mock_sfp = MagicMock()
+        mock_sfp.get_presence = MagicMock(return_value=True)
+        mock_sfp.get_xcvr_api = MagicMock(return_value=mock_xcvr_api)
+
+        port_mapping = PortMapping()
+        port_mapping.handle_port_change_event(PortChangeEvent('Ethernet0', 1, 0, PortChangeEvent.PORT_ADD))
+        stop_event = threading.Event()
+        task = CmisManagerTask(DEFAULT_NAMESPACE, port_mapping, {1: mock_sfp}, stop_event)
+        task.xcvr_table_helper = XcvrTableHelper(DEFAULT_NAMESPACE)
+        task.xcvr_table_helper.get_status_sw_tbl.return_value = mock_get_status_sw_tbl
+
+        port_change_event = PortChangeEvent('Ethernet0', 1, 0, PortChangeEvent.PORT_SET,
+                                            {'speed': '100000', 'lanes': '1,2', 'subport': '1'})
+        task.on_port_update_event(port_change_event)
+
+        task.update_port_transceiver_status_table_sw_cmis_state('Ethernet0', CMIS_STATE_DP_DEINIT)
+        task.port_dict['Ethernet0']['host_tx_ready'] = 'true'
+        task.port_dict['Ethernet0']['admin_status'] = 'up'
+        task.port_dict['Ethernet0']['appl'] = 1
+        task.port_dict['Ethernet0']['host_lanes_mask'] = 0x03
+        task.port_dict['Ethernet0']['max_host_lanes_mask'] = 0xff
+        task.port_dict['Ethernet0']['max_media_lanes_mask'] = 0xff
+        task.port_dict['Ethernet0']['media_lanes_mask'] = 0x03
+
+        task.process_single_lport('Ethernet0', task.port_dict['Ethernet0'])
+
+        if tx_disable_support is False:
+            mock_xcvr_api.tx_disable_channel.assert_not_called()
+        else:
+            mock_xcvr_api.tx_disable_channel.assert_called_once_with(0xff, True)
+        if expected_state == CMIS_STATE_AP_CONF:
+            mock_xcvr_api.set_lpmode.assert_called_once_with(False, wait_state_change=False)
+        else:
+            mock_xcvr_api.set_lpmode.assert_not_called()
+        assert common.get_cmis_state_from_state_db('Ethernet0', mock_get_status_sw_tbl) == expected_state
+
     @patch('xcvrd.xcvrd.platform_chassis')
     @patch('xcvrd.xcvrd_utilities.common.is_fast_reboot_enabled', MagicMock(return_value=(False)))
     @patch('xcvrd.cmis.cmis_manager_task.PortChangeObserver', MagicMock(handle_port_update_event=MagicMock()))
